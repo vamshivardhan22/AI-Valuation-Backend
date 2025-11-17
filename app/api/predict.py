@@ -123,7 +123,7 @@ async def property_valuation(request: FullPropertyRequest):
         base_result["pricing"]["price_trends"] = trends
 
         # ----------------------------------------------------
-        # STEP 4: ML PREDICTED PRICE (YOUR TRAINED MODEL)
+        # STEP 4: ML PREDICTED PRICE (LightGBM model)
         # ----------------------------------------------------
         ml_price = predict_price(
             city=request.city,
@@ -135,7 +135,8 @@ async def property_valuation(request: FullPropertyRequest):
             crime_index=request.crime_index,
             amenities_count=request.amenities_count,
             road_width=request.road_width,
-            zone=request.zone
+            zone=request.zone,
+            price_per_sqft=price_per_sqft
         )
 
         base_result["ml_predicted_price"] = ml_price
@@ -151,7 +152,7 @@ async def property_valuation(request: FullPropertyRequest):
 
 
 # ------------------------------------------------
-# EXISTING VALUATION ENDPOINT
+# EXISTING SIMPLE VALUATION ENDPOINT
 # ------------------------------------------------
 @router.post("/valuation")
 async def valuation(request: ValuationRequest):
