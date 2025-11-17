@@ -1,10 +1,19 @@
-lightgbm==4.3.0
 fastapi
-uvicorn[standard]
+uvicorn
 httpx
-geopy
-pandas
+pydantic
+python-dotenv
+joblib
 numpy
 scikit-learn
-joblib
-python-dotenv
+
+# Geo & calculations
+geopy
+pandas
+
+# Light, safe versions for Railway
+xgboost==2.0.3
+
+# For Overpass API / OSM data
+requests
+
