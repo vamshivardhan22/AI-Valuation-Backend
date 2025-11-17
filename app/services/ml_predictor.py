@@ -1,62 +1,59 @@
-# app/services/ml_predictor.py
-
+import onnxruntime as ort
+import numpy as np
 import joblib
 import os
-import numpy as np
 
-# Load model + encoders
+# Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "../models/lgbm_price_model_quant.onnx")
+ENCODER_PATH = os.path.join(BASE_DIR, "../models/label_encoders.pkl")
 
-MODEL_PATH = os.path.join(BASE_DIR, "..", "models", "lightgbm_price_model.pkl")
-ENCODER_PATH = os.path.join(BASE_DIR, "..", "models", "label_encoders.pkl")
+# Load label encoders
+encoders = joblib.load(ENCODER_PATH)
 
-model = joblib.load(MODEL_PATH)
-label_encoders = joblib.load(ENCODER_PATH)
+# Load ONNX model
+session = ort.InferenceSession(
+    MODEL_PATH,
+    providers=["CPUExecutionProvider"]
+)
+
+# Extract input/output node names
+input_name = session.get_inputs()[0].name
+output_name = session.get_outputs()[0].name
 
 
-def predict_price(
-    city: str,
-    state: str,
-    sqft: float,
-    bedrooms: int,
-    bathrooms: int,
-    age: float,
-    crime_index: float,
-    amenities_count: float,
-    road_width: float,
-    zone: str
-):
+def preprocess_input(data: dict):
+    """Encode categorical fields & prepare model array."""
+    x = []
+
+    # Encode categorical
+    x.append(encoders["city"].transform([data["city"]])[0])
+    x.append(encoders["state"].transform([data["state"]])[0])
+    
+    # Numeric values
+    x.append(float(data["sqft"]))
+    x.append(int(data["bedrooms"]))
+    x.append(int(data["bathrooms"]))
+    x.append(float(data["age"]))
+    x.append(float(data["crime_index"]))
+    x.append(int(data["amenities_count"]))
+    x.append(float(data["road_width"]))
+
+    # Encode zone
+    x.append(encoders["zone"].transform([data["zone"]])[0])
+
+    return np.array([x], dtype=np.float32)
+
+
+def predict_price(**kwargs):
     """
-    Predict total property price using LightGBM.
+    Accepts keyword arguments from predict.py
+    Converts to dict internally.
     """
+    data = dict(kwargs)
 
-    # Encode categorical fields
-    def encode_safe(encoder, value):
-        try:
-            return encoder.transform([value])[0]
-        except:
-            return 0  # fallback if unseen label
+    inputs = preprocess_input(data)
 
-    city_encoded = encode_safe(label_encoders["city"], city)
-    state_encoded = encode_safe(label_encoders["state"], state)
-    zone_encoded = encode_safe(label_encoders["zone"], zone)
+    pred = session.run([output_name], {input_name: inputs})[0]
 
-    # Create feature array
-    features = np.array([[
-        city_encoded,
-        state_encoded,
-        sqft,
-        bedrooms,
-        bathrooms,
-        age,
-        crime_index,
-        amenities_count,
-        road_width,
-        zone_encoded
-    ]], dtype=float)
-
-    # Predict total price
-    prediction = model.predict(features)[0]
-
-    return round(float(prediction), 2)
-
+    return float(pred[0][0])

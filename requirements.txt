@@ -3,17 +3,19 @@ uvicorn
 httpx
 pydantic
 python-dotenv
-joblib
-numpy
-scikit-learn
 
-# Geo & calculations
+# ML utilities
+joblib
+numpy==1.26.4
+scikit-learn==1.2.2
+
+# ONNX Runtime (for your deployed model)
+onnxruntime==1.17.0
+
+# Geography & data
 geopy
 pandas
 
-# Light, safe versions for Railway
-xgboost==2.0.3
-
-# For Overpass API / OSM data
+# API utilities
 requests
 

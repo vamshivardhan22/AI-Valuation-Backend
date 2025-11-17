@@ -2,11 +2,11 @@
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+import numpy as np
+import joblib
+import onnxruntime as ort
 
-# ML Model
-from app.services.ml_predictor import predict_price
-
-# Existing services
+# Existing Services
 from app.services.combined_model import get_full_property_insights
 from app.services.land_valuation import calculate_land_value
 from app.services.price_trends import calculate_price_trends
@@ -14,10 +14,22 @@ from app.services.price_trends import calculate_price_trends
 
 router = APIRouter(prefix="/predict", tags=["Valuation"])
 
+# =====================================
+# Load Encoders + ONNX Quantized Model
+# =====================================
+ENCODER_PATH = "app/models/label_encoders.pkl"
+MODEL_PATH = "app/models/lgbm_price_model_quant.onnx"
 
-# ------------------------------------------------
-# City-wise rent-to-price ratio 
-# ------------------------------------------------
+encoders = joblib.load(ENCODER_PATH)
+
+session = ort.InferenceSession(
+    MODEL_PATH,
+    providers=["CPUExecutionProvider"]
+)
+
+# ===========================
+# Rent Ratio Mapping
+# ===========================
 RENT_RATIO = {
     "hyderabad": 0.025,
     "bangalore": 0.028,
@@ -32,10 +44,10 @@ RENT_RATIO = {
     "default": 0.025
 }
 
-
-# ------------------------------------------------
+# ===============================
 # Request Models
-# ------------------------------------------------
+# ===============================
+
 class ValuationRequest(BaseModel):
     city: str
     state: str
@@ -64,14 +76,52 @@ class LandValuationRequest(BaseModel):
     zone: str
 
 
+# =============================================
+# Helper: Encode categorical inputs
+# =============================================
+def encode_input(data: dict):
+    processed = data.copy()
 
-# --------------------------------------------------------
-# 🔥 NEW ENDPOINT: FULL PROPERTY + ML PRICE COMBINED
-# --------------------------------------------------------
+    for col, le in encoders.items():
+        if col in processed:
+            processed[col] = le.transform([processed[col]])[0]
+
+    return processed
+
+
+# =============================================
+# ONNX Prediction Function
+# =============================================
+def onnx_predict_price(**kwargs):
+
+    data_enc = encode_input(kwargs)
+
+    features = np.array([[
+        data_enc["city"],
+        data_enc["state"],
+        data_enc["sqft"],
+        data_enc["bedrooms"],
+        data_enc["bathrooms"],
+        data_enc["age"],
+        data_enc["crime_index"],
+        data_enc["amenities_count"],
+        data_enc["road_width"],
+        data_enc["zone"],
+    ]], dtype=np.float32)
+
+    inputs = {session.get_inputs()[0].name: features}
+    prediction = session.run(None, inputs)[0]
+
+    return float(prediction[0][0])
+
+
+# =====================================================================
+# 🔥 FULL PROPERTY VALUATION ENDPOINT (AI + Rent + Price Trends + ML)
+# =====================================================================
 @router.post("/property-valuation")
 async def property_valuation(request: FullPropertyRequest):
     try:
-        # STEP 1: Existing AI valuation
+        # 1. Base insights using your combined model
         base_result = await get_full_property_insights(
             city=request.city,
             state=request.state,
@@ -84,7 +134,7 @@ async def property_valuation(request: FullPropertyRequest):
         base_result["pricing"]["sqft"] = request.sqft
         base_result["pricing"]["total_property_value"] = total_value
 
-        # STEP 2: Rent Prediction
+        # 2. Rent Estimation
         city_lower = request.city.lower()
         rent_ratio = RENT_RATIO.get(city_lower, RENT_RATIO["default"])
 
@@ -104,8 +154,8 @@ async def property_valuation(request: FullPropertyRequest):
         monthly_rent = round(monthly_rent, 2)
 
         rent_confidence = round(
-            (base_result["overall_confidence"] * 0.7) +
-            (amenities_score * 0.3), 2
+            (base_result["overall_confidence"] * 0.7)
+            + (amenities_score * 0.3), 2
         )
 
         base_result["pricing"]["rent_estimate"] = {
@@ -114,7 +164,7 @@ async def property_valuation(request: FullPropertyRequest):
             "rent_confidence": rent_confidence
         }
 
-        # STEP 3: Price Trends
+        # 3. Price Trends
         trends = calculate_price_trends(
             inflation_rate=inflation,
             amenities_score=amenities_score,
@@ -122,10 +172,10 @@ async def property_valuation(request: FullPropertyRequest):
         )
         base_result["pricing"]["price_trends"] = trends
 
-        # ----------------------------------------------------
-        # STEP 4: ML PREDICTED PRICE (LightGBM model)
-        # ----------------------------------------------------
-        ml_price = predict_price(
+        # -----------------------------------------------------
+        # 4. ONNX LightGBM ML Model Prediction (FINAL ML PRICE)
+        # -----------------------------------------------------
+        ml_price = onnx_predict_price(
             city=request.city,
             state=request.state,
             sqft=request.sqft,
@@ -135,8 +185,7 @@ async def property_valuation(request: FullPropertyRequest):
             crime_index=request.crime_index,
             amenities_count=request.amenities_count,
             road_width=request.road_width,
-            zone=request.zone,
-            price_per_sqft=price_per_sqft
+            zone=request.zone
         )
 
         base_result["ml_predicted_price"] = ml_price
@@ -144,16 +193,12 @@ async def property_valuation(request: FullPropertyRequest):
         return base_result
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Property valuation failed: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Property valuation failed: {str(e)}")
 
 
-
-# ------------------------------------------------
-# EXISTING SIMPLE VALUATION ENDPOINT
-# ------------------------------------------------
+# =============================================
+# BASIC VALUATION ENDPOINT
+# =============================================
 @router.post("/valuation")
 async def valuation(request: ValuationRequest):
     try:
@@ -169,55 +214,15 @@ async def valuation(request: ValuationRequest):
         base_result["pricing"]["sqft"] = request.sqft
         base_result["pricing"]["total_property_value"] = total_value
 
-        city_lower = request.city.lower()
-        rent_ratio = RENT_RATIO.get(city_lower, RENT_RATIO["default"])
-
-        yearly_rent = total_value * rent_ratio
-        monthly_rent = yearly_rent / 12
-
-        amenities_score = base_result["pricing"]["amenities_score"]
-        crime_effect = base_result["pricing"]["crime_effect_percent"]
-        inflation = base_result["pricing"]["inflation_adjustment_percent"]
-
-        monthly_rent *= (1 + amenities_score * 0.10)
-
-        if crime_effect < 0:
-            monthly_rent *= (1 - abs(crime_effect) / 100)
-
-        monthly_rent *= (1 + inflation / 200)
-        monthly_rent = round(monthly_rent, 2)
-
-        rent_confidence = round(
-            (base_result["overall_confidence"] * 0.7) +
-            (amenities_score * 0.3), 2
-        )
-
-        base_result["pricing"]["rent_estimate"] = {
-            "monthly_rent": monthly_rent,
-            "rent_ratio_used": rent_ratio,
-            "rent_confidence": rent_confidence
-        }
-
-        trends = calculate_price_trends(
-            inflation_rate=inflation,
-            amenities_score=amenities_score,
-            crime_effect=crime_effect
-        )
-        base_result["pricing"]["price_trends"] = trends
-
         return base_result
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Valuation processing error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Valuation failed: {str(e)}")
 
 
-
-# ------------------------------------------------
-# LAND VALUATION ENDPOINT
-# ------------------------------------------------
+# =============================================
+# LAND VALUATION
+# =============================================
 @router.post("/land-valuation")
 async def land_valuation(request: LandValuationRequest):
     try:
@@ -228,9 +233,5 @@ async def land_valuation(request: LandValuationRequest):
             road_width=request.road_width,
             zone=request.zone
         )
-
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Land valuation failed: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Land valuation failed: {str(e)}")
