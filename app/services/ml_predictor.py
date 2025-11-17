@@ -8,29 +8,36 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "../models/lgbm_price_model_quant.onnx")
 ENCODER_PATH = os.path.join(BASE_DIR, "../models/label_encoders.pkl")
 
-# Load label encoders
+# Load encoders
 encoders = joblib.load(ENCODER_PATH)
 
-# Load ONNX model
+# Load ONNX runtime session
 session = ort.InferenceSession(
     MODEL_PATH,
     providers=["CPUExecutionProvider"]
 )
 
-# Extract input/output node names
 input_name = session.get_inputs()[0].name
 output_name = session.get_outputs()[0].name
 
 
+def safe_encode(encoder, value):
+    """Encode a label safely; fallback to first known label."""
+    try:
+        return encoder.transform([value])[0]
+    except:
+        return encoder.transform([encoder.classes_[0]])[0]
+
+
 def preprocess_input(data: dict):
-    """Encode categorical fields & prepare model array."""
+    """Prepare the input row for ONNX model."""
     x = []
 
-    # Encode categorical
-    x.append(encoders["city"].transform([data["city"]])[0])
-    x.append(encoders["state"].transform([data["state"]])[0])
-    
-    # Numeric values
+    # Safe categorical encoding
+    x.append(safe_encode(encoders["city"], data["city"]))
+    x.append(safe_encode(encoders["state"], data["state"]))
+
+    # Numeric
     x.append(float(data["sqft"]))
     x.append(int(data["bedrooms"]))
     x.append(int(data["bathrooms"]))
@@ -39,21 +46,18 @@ def preprocess_input(data: dict):
     x.append(int(data["amenities_count"]))
     x.append(float(data["road_width"]))
 
-    # Encode zone
-    x.append(encoders["zone"].transform([data["zone"]])[0])
+    # Zone (with safe encoding)
+    x.append(safe_encode(encoders["zone"], data["zone"]))
 
     return np.array([x], dtype=np.float32)
 
 
 def predict_price(**kwargs):
-    """
-    Accepts keyword arguments from predict.py
-    Converts to dict internally.
-    """
+    """Runs the ONNX model prediction."""
     data = dict(kwargs)
 
-    inputs = preprocess_input(data)
+    X = preprocess_input(data)
 
-    pred = session.run([output_name], {input_name: inputs})[0]
+    pred = session.run([output_name], {input_name: X})[0]
 
     return float(pred[0][0])
