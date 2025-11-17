@@ -9,7 +9,7 @@ joblib
 numpy==1.26.4
 scikit-learn==1.2.2
 
-# ONNX Runtime (for your deployed model)
+# ONNX Runtime (for your quantized LGBM model)
 onnxruntime==1.17.0
 
 # Geography & data
@@ -18,4 +18,3 @@ pandas
 
 # API utilities
 requests
-
