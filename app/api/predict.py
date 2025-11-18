@@ -12,7 +12,7 @@ from app.services.land_valuation import calculate_land_value
 from app.services.price_trends import calculate_price_trends
 
 
-router = APIRouter(prefix="/predict", tags=["Valuation & AI Models"])
+router = APIRouter(prefix="/predict", tags=["Valuation & ML Pricing"])
 
 
 # ------------------------------------------------
@@ -31,7 +31,6 @@ RENT_RATIO = {
     "jaipur": 0.024,
     "default": 0.025
 }
-
 
 # ------------------------------------------------
 # Request Models
@@ -65,7 +64,7 @@ class LandValuationRequest(BaseModel):
 
 
 # --------------------------------------------------------
-# FULL PROPERTY VALUATION + ML PRICE (ONNX)
+# 🔥 FULL PROPERTY VALUATION + ML PRICE (ONNX)
 # --------------------------------------------------------
 @router.post("/property-valuation")
 async def property_valuation(request: FullPropertyRequest):
@@ -74,52 +73,49 @@ async def property_valuation(request: FullPropertyRequest):
         req_state = request.state.lower()
         req_zone = request.zone.lower()
 
-        # 1️⃣ Base insights
+        # 1️⃣ Insights model
         base_result = await get_full_property_insights(
             city=req_city,
             state=req_state,
             crime_index=request.crime_index
         )
 
-        price_per_sqft = base_result["pricing"]["final_price_per_sqft"]
-        final_value = round(price_per_sqft * request.sqft, 2)
+        price_sqft = base_result["pricing"]["final_price_per_sqft"]
+        final_value = round(price_sqft * request.sqft, 2)
 
         base_result["pricing"]["sqft"] = request.sqft
         base_result["pricing"]["total_property_value"] = final_value
 
-        # 2️⃣ Rent
+        # 2️⃣ Rent estimation
         rent_ratio = RENT_RATIO.get(req_city, RENT_RATIO["default"])
         monthly_rent = (final_value * rent_ratio) / 12
 
-        amenities_score = base_result["pricing"]["amenities_score"]
+        amenities = base_result["pricing"]["amenities_score"]
         crime_effect = base_result["pricing"]["crime_effect_percent"]
         inflation = base_result["pricing"]["inflation_adjustment_percent"]
 
-        monthly_rent *= (1 + amenities_score * 0.10)
-        if crime_effect < 0:
-            monthly_rent *= (1 - abs(crime_effect) / 100)
+        monthly_rent *= (1 + amenities * 0.10)
+        monthly_rent *= (1 - abs(crime_effect) / 100) if crime_effect < 0 else monthly_rent
         monthly_rent *= (1 + inflation / 200)
         monthly_rent = round(monthly_rent, 2)
-
-        rent_confidence = round(
-            (base_result["overall_confidence"] * 0.7)
-            + (amenities_score * 0.3), 2
-        )
 
         base_result["pricing"]["rent_estimate"] = {
             "monthly_rent": monthly_rent,
             "rent_ratio_used": rent_ratio,
-            "rent_confidence": rent_confidence
+            "rent_confidence": round(
+                (base_result["overall_confidence"] * 0.7) +
+                (amenities * 0.3), 2
+            )
         }
 
         # 3️⃣ Price trends
         base_result["pricing"]["price_trends"] = calculate_price_trends(
             inflation_rate=inflation,
-            amenities_score=amenities_score,
+            amenities_score=amenities,
             crime_effect=crime_effect
         )
 
-        # 4️⃣ ML predicted price
+        # 4️⃣ ML Price prediction (ONNX)
         ml_price = predict_price(
             city=req_city,
             state=req_state,
@@ -138,10 +134,7 @@ async def property_valuation(request: FullPropertyRequest):
         return base_result
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Property valuation failed: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Property valuation failed: {str(e)}")
 
 
 # ------------------------------------------------
@@ -159,49 +152,16 @@ async def valuation(request: ValuationRequest):
             crime_index=request.crime_index
         )
 
-        price_per_sqft = base_result["pricing"]["final_price_per_sqft"]
-        total_value = round(price_per_sqft * request.sqft, 2)
+        price = base_result["pricing"]["final_price_per_sqft"]
+        total_value = round(price * request.sqft, 2)
 
         base_result["pricing"]["sqft"] = request.sqft
         base_result["pricing"]["total_property_value"] = total_value
 
-        rent_ratio = RENT_RATIO.get(req_city, RENT_RATIO["default"])
-        monthly_rent = (total_value * rent_ratio) / 12
-
-        amenities_score = base_result["pricing"]["amenities_score"]
-        crime_effect = base_result["pricing"]["crime_effect_percent"]
-        inflation = base_result["pricing"]["inflation_adjustment_percent"]
-
-        monthly_rent *= (1 + amenities_score * 0.10)
-        if crime_effect < 0:
-            monthly_rent *= (1 - abs(crime_effect) / 100)
-        monthly_rent *= (1 + inflation / 200)
-        monthly_rent = round(monthly_rent, 2)
-
-        rent_confidence = round(
-            (base_result["overall_confidence"] * 0.7)
-            + (amenities_score * 0.3), 2
-        )
-
-        base_result["pricing"]["rent_estimate"] = {
-            "monthly_rent": monthly_rent,
-            "rent_ratio_used": rent_ratio,
-            "rent_confidence": rent_confidence
-        }
-
-        base_result["pricing"]["price_trends"] = calculate_price_trends(
-            inflation_rate=inflation,
-            amenities_score=amenities_score,
-            crime_effect=crime_effect
-        )
-
         return base_result
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Valuation processing error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ------------------------------------------------
@@ -219,7 +179,4 @@ async def land_valuation(request: LandValuationRequest):
         )
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Land valuation failed: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=str(e))
