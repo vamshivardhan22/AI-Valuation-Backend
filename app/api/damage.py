@@ -1,18 +1,24 @@
+# app/api/damage.py
+
 from fastapi import APIRouter, File, UploadFile, HTTPException
 from app.services.damage_detector import run_damage_detection
 
-router = APIRouter(prefix="/predict", tags=["Damage Detection"])
+# Important: Keep this separate from /predict
+router = APIRouter(prefix="/damage", tags=["Damage Detection"])
 
 
-@router.post("/damage-detection")
+@router.post("/detect")
 async def detect_damage(file: UploadFile = File(...)):
     """
-    Upload an image → ONNX MobileNet → Detect damage level.
+    Upload an image → ONNX MobileNet → Detect property damage level.
     """
     try:
-        # File validation
+        # Validate image format
         if not file.filename.lower().endswith((".jpg", ".jpeg", ".png")):
-            raise HTTPException(status_code=400, detail="Only JPG and PNG files are allowed")
+            raise HTTPException(
+                status_code=400,
+                detail="Only JPG and PNG image formats are supported"
+            )
 
         # Read raw image bytes
         image_bytes = await file.read()
@@ -24,8 +30,11 @@ async def detect_damage(file: UploadFile = File(...)):
             "filename": file.filename,
             "damage_score": result["score"],
             "damage_label": result["label"],
-            "confidence": result["confidence"],
+            "confidence": result["confidence"]
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Damage detection failed: {str(e)}"
+        )
