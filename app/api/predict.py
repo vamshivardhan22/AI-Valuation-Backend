@@ -1,18 +1,22 @@
 # app/api/predict.py
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, File, UploadFile
 from pydantic import BaseModel
+from PIL import Image
 
-# ML (ONNX LightGBM)
+# ML price predictor (ONNX LightGBM)
 from app.services.ml_predictor import predict_price
 
-# Existing Services
+# New Damage Detector
+from app.services.damage_detector import predict_damage
+
+# Existing services
 from app.services.combined_model import get_full_property_insights
 from app.services.land_valuation import calculate_land_value
 from app.services.price_trends import calculate_price_trends
 
 
-router = APIRouter(prefix="/predict", tags=["Valuation"])
+router = APIRouter(prefix="/predict", tags=["Valuation & AI Models"])
 
 
 # ------------------------------------------------
@@ -36,7 +40,6 @@ RENT_RATIO = {
 # ------------------------------------------------
 # Request Models
 # ------------------------------------------------
-
 class ValuationRequest(BaseModel):
     city: str
     state: str
@@ -66,17 +69,16 @@ class LandValuationRequest(BaseModel):
 
 
 # --------------------------------------------------------
-# 🔥 FULL PROPERTY + ML PRICE COMBINED
+# 🔥 FULL PROPERTY VALUATION + ML PRICE (ONNX)
 # --------------------------------------------------------
 @router.post("/property-valuation")
 async def property_valuation(request: FullPropertyRequest):
     try:
-        # Normalize to lowercase (SAFETY)
         req_city = request.city.lower()
         req_state = request.state.lower()
         req_zone = request.zone.lower()
 
-        # STEP 1: Existing Insight Model
+        # 1️⃣ Get insights
         base_result = await get_full_property_insights(
             city=req_city,
             state=req_state,
@@ -84,29 +86,31 @@ async def property_valuation(request: FullPropertyRequest):
         )
 
         price_per_sqft = base_result["pricing"]["final_price_per_sqft"]
-        total_value = round(price_per_sqft * request.sqft, 2)
+        final_property_value = round(price_per_sqft * request.sqft, 2)
 
         base_result["pricing"]["sqft"] = request.sqft
-        base_result["pricing"]["total_property_value"] = total_value
+        base_result["pricing"]["total_property_value"] = final_property_value
 
-        # STEP 2: Rent prediction
+        # 2️⃣ Rent estimation
         rent_ratio = RENT_RATIO.get(req_city, RENT_RATIO["default"])
-        yearly_rent = total_value * rent_ratio
-        monthly_rent = yearly_rent / 12
+        monthly_rent = (final_property_value * rent_ratio) / 12
 
         amenities_score = base_result["pricing"]["amenities_score"]
         crime_effect = base_result["pricing"]["crime_effect_percent"]
         inflation = base_result["pricing"]["inflation_adjustment_percent"]
 
+        # Adjustments
         monthly_rent *= (1 + amenities_score * 0.10)
+
         if crime_effect < 0:
             monthly_rent *= (1 - abs(crime_effect) / 100)
+
         monthly_rent *= (1 + inflation / 200)
         monthly_rent = round(monthly_rent, 2)
 
         rent_confidence = round(
-            (base_result["overall_confidence"] * 0.7) +
-            (amenities_score * 0.3), 2
+            (base_result["overall_confidence"] * 0.7)
+            + (amenities_score * 0.3), 2
         )
 
         base_result["pricing"]["rent_estimate"] = {
@@ -115,16 +119,14 @@ async def property_valuation(request: FullPropertyRequest):
             "rent_confidence": rent_confidence
         }
 
-        # STEP 3: Price Trends
+        # 3️⃣ Price trends
         base_result["pricing"]["price_trends"] = calculate_price_trends(
             inflation_rate=inflation,
             amenities_score=amenities_score,
             crime_effect=crime_effect
         )
 
-        # ----------------------------------------------------
-        # STEP 4: ONNX ML PRICE PREDICTION
-        # ----------------------------------------------------
+        # 4️⃣ ML ONNX predicted price per sqft
         ml_price = predict_price(
             city=req_city,
             state=req_state,
@@ -150,7 +152,7 @@ async def property_valuation(request: FullPropertyRequest):
 
 
 # ------------------------------------------------
-# BASIC VALUATION ENDPOINT
+# BASIC VALUATION (NO FULL ML)
 # ------------------------------------------------
 @router.post("/valuation")
 async def valuation(request: ValuationRequest):
@@ -171,8 +173,7 @@ async def valuation(request: ValuationRequest):
         base_result["pricing"]["total_property_value"] = total_value
 
         rent_ratio = RENT_RATIO.get(req_city, RENT_RATIO["default"])
-        yearly_rent = total_value * rent_ratio
-        monthly_rent = yearly_rent / 12
+        monthly_rent = (total_value * rent_ratio) / 12
 
         amenities_score = base_result["pricing"]["amenities_score"]
         crime_effect = base_result["pricing"]["crime_effect_percent"]
@@ -182,11 +183,11 @@ async def valuation(request: ValuationRequest):
         if crime_effect < 0:
             monthly_rent *= (1 - abs(crime_effect) / 100)
         monthly_rent *= (1 + inflation / 200)
-        monthly_rent = round(monthly_rent, 2)
 
+        monthly_rent = round(monthly_rent, 2)
         rent_confidence = round(
-            (base_result["overall_confidence"] * 0.7) +
-            (amenities_score * 0.3), 2
+            (base_result["overall_confidence"] * 0.7)
+            + (amenities_score * 0.3), 2
         )
 
         base_result["pricing"]["rent_estimate"] = {
@@ -211,7 +212,7 @@ async def valuation(request: ValuationRequest):
 
 
 # ------------------------------------------------
-# LAND VALUATION ENDPOINT
+# LAND VALUATION
 # ------------------------------------------------
 @router.post("/land-valuation")
 async def land_valuation(request: LandValuationRequest):
@@ -223,9 +224,29 @@ async def land_valuation(request: LandValuationRequest):
             road_width=request.road_width,
             zone=request.zone.lower()
         )
-
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Land valuation failed: {str(e)}"
+        )
+
+
+# ------------------------------------------------
+# 🟩 DAMAGE DETECTION (Image → ONNX MobileNet)
+# ------------------------------------------------
+@router.post("/damage-detection")
+async def detect_damage(file: UploadFile = File(...)):
+    try:
+        image = Image.open(file.file)
+        predictions = predict_damage(image)
+
+        return {
+            "filename": file.filename,
+            "top_predictions": predictions
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Damage detection failed: {str(e)}"
         )
