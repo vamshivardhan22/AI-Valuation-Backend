@@ -1,14 +1,15 @@
-# app/services/damage_detector.py
-
-import os
 import onnxruntime as ort
 import numpy as np
 from PIL import Image
+import io
+import os
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "../models/damage_detector.onnx")
 
-# Load ONNX model
+
+# Load ONNX model once
 session = ort.InferenceSession(
     MODEL_PATH,
     providers=["CPUExecutionProvider"]
@@ -18,41 +19,29 @@ input_name = session.get_inputs()[0].name
 output_name = session.get_outputs()[0].name
 
 
-def preprocess_image(image: Image.Image):
-    """Resize + normalize image for MobileNetV2 ONNX."""
-    image = image.resize((224, 224))
-    image = image.convert("RGB")
-
-    img = np.array(image).astype("float32") / 255.0
-
-    # Normalize like ImageNet
-    mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
-
-    img = (img - mean) / std
-
-    # HWC → CHW
-    img = np.transpose(img, (0, 1, 2))[np.newaxis, :]
-    return img.astype(np.float32)
+# Damage labels for this model
+LABELS = ["no_damage", "minor_damage", "major_damage"]
 
 
-def predict_damage(image: Image.Image):
-    """Run ONNX model and return top predictions."""
-    x = preprocess_image(image)
+def preprocess_image(image_bytes):
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = img.resize((224, 224))
+    img = np.array(img).astype("float32") / 255.0
+    img = np.transpose(img, (2, 0, 1))   # CHW
+    img = np.expand_dims(img, axis=0)    # Batch
+    return img
 
-    pred = session.run([output_name], {input_name: x})[0][0]
 
-    # Convert logits → probabilities
-    exp = np.exp(pred - np.max(pred))
-    probs = exp / exp.sum()
+def run_damage_detection(image_bytes):
+    img = preprocess_image(image_bytes)
 
-    # Top-3 predictions
-    top_idx = probs.argsort()[-3:][::-1]
+    pred = session.run([output_name], {input_name: img})[0]
 
-    return [
-        {
-            "class_id": int(i),
-            "confidence": float(probs[i])
-        }
-        for i in top_idx
-    ]
+    index = int(np.argmax(pred))
+    score = float(pred[0][index])
+
+    return {
+        "label": LABELS[index],
+        "score": round(score, 4),
+        "confidence": round(score * 100, 2)
+    }
