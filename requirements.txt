@@ -18,9 +18,11 @@ pandas
 
 # API utilities
 requests
-python-multipart==0.0.9
+python-multipart
 
-# Image processing
+# Damage detection
 Pillow
 
+# GOOGLE AUTH
 PyJWT==2.8.0
+

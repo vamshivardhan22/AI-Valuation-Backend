@@ -1,103 +1,62 @@
-# app/api/auth.py
-
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
+from fastapi import HTTPException
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
 import httpx
-import os
 import jwt
-from datetime import datetime, timedelta
+import os
 
+router = APIRouter(prefix="/auth", tags=["Auth"])
 
-router = APIRouter(prefix="/auth", tags=["Google Login"])
-
-
-# Load secrets from environment (Render Dashboard → Environment)
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")  # Example: https://yourbackend.onrender.com/auth/callback
-JWT_SECRET = os.getenv("JWT_SECRET")  # random 32 chars
+JWT_SECRET = os.getenv("JWT_SECRET")
+REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 
 
-# -----------------------------------------------------------
-# 1️⃣ Google Login URL
-# -----------------------------------------------------------
-@router.get("/login")
-def google_login():
+@router.get("/google/login")
+async def google_login():
     google_auth_url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
-        "?response_type=code"
-        f"&client_id={GOOGLE_CLIENT_ID}"
-        f"&redirect_uri={GOOGLE_REDIRECT_URI}"
-        "&scope=openid%20email%20profile"
-        "&access_type=offline"
-        "&prompt=consent"
+        f"?client_id={GOOGLE_CLIENT_ID}"
+        f"&redirect_uri={REDIRECT_URI}"
+        "&response_type=code"
+        "&scope=openid%20profile%20email"
     )
-    return {"auth_url": google_auth_url}
+    return RedirectResponse(google_auth_url)
 
 
-# -----------------------------------------------------------
-# 2️⃣ Callback — Google sends ?code=
-# -----------------------------------------------------------
-@router.get("/callback")
+@router.get("/google/callback")
 async def google_callback(code: str):
-    try:
-        # Exchange code for token
-        token_url = "https://oauth2.googleapis.com/token"
+    token_url = "https://oauth2.googleapis.com/token"
 
-        data = {
-            "code": code,
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "redirect_uri": GOOGLE_REDIRECT_URI,
-            "grant_type": "authorization_code",
-        }
+    data = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": REDIRECT_URI,
+    }
 
-        async with httpx.AsyncClient() as client:
-            token_response = await client.post(token_url, data=data)
-            token_data = token_response.json()
+    async with httpx.AsyncClient() as client:
+        token_res = await client.post(token_url, data=data)
 
-        access_token = token_data.get("access_token")
+    if "access_token" not in token_res.json():
+        raise HTTPException(status_code=400, detail="Google Auth Failed")
 
-        if not access_token:
-            raise HTTPException(status_code=400, detail="Failed to get access token.")
+    access_token = token_res.json()["access_token"]
 
-        # Fetch User Info
-        userinfo_url = "https://www.googleapis.com/oauth2/v1/userinfo"
-        async with httpx.AsyncClient() as client:
-            userinfo = await client.get(
-                userinfo_url,
-                headers={"Authorization": f"Bearer {access_token}"}
-            )
+    async with httpx.AsyncClient() as client:
+        user_res = await client.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
 
-        user_data = userinfo.json()
+    user = user_res.json()
 
-        email = user_data.get("email")
-        name = user_data.get("name")
-        picture = user_data.get("picture")
+    jwt_token = jwt.encode(
+        {"email": user["email"], "name": user.get("name")},
+        JWT_SECRET,
+        algorithm="HS256"
+    )
 
-        # -----------------------------------------------------------
-        # 3️⃣ Create JWT Token (valid for 7 days)
-        # -----------------------------------------------------------
-        payload = {
-            "email": email,
-            "name": name,
-            "picture": picture,
-            "exp": datetime.utcnow() + timedelta(days=7)
-        }
-
-        token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
-        return {
-            "success": True,
-            "token": token,
-            "user": {
-                "email": email,
-                "name": name,
-                "picture": picture
-            }
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Auth failed: {str(e)}")
-
+    return {"token": jwt_token, "user": user}
