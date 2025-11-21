@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import RedirectResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 import httpx
 import jwt
@@ -11,13 +12,19 @@ from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
+# ENV variables
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 JWT_SECRET = os.getenv("JWT_SECRET")
+REDIRECT_URI = os.getenv("REDIRECT_URI")
 
-REDIRECT_URI = os.getenv("REDIRECT_URI")  # Must match Google Console
+# Security
+security = HTTPBearer()
 
 
+# -------------------------------
+# Google OAuth Login URL
+# -------------------------------
 @router.get("/google/login")
 async def google_login():
     if not GOOGLE_CLIENT_ID or not REDIRECT_URI:
@@ -36,9 +43,12 @@ async def google_login():
     return RedirectResponse(google_auth_url)
 
 
+# -------------------------------
+# Google OAuth Callback
+# -------------------------------
 @router.get("/google/callback")
 async def google_callback(code: str, db: Session = Depends(get_db)):
-    # Validate config
+
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET or not REDIRECT_URI:
         raise HTTPException(status_code=500, detail="OAuth config missing")
 
@@ -52,7 +62,7 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
         "redirect_uri": REDIRECT_URI,
     }
 
-    # Exchange code for token
+    # Exchange code → access token
     async with httpx.AsyncClient() as client:
         token_res = await client.post(token_url, data=token_data)
 
@@ -72,7 +82,7 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
 
     g_user = user_res.json()
 
-    # Find or create DB user
+    # Check DB user
     user = db.query(User).filter(User.google_id == g_user["id"]).first()
 
     if user:
@@ -91,7 +101,7 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    # Create JWT
+    # Create JWT token
     jwt_token = jwt.encode(
         {"user_id": user.id, "email": user.email},
         JWT_SECRET,
@@ -106,20 +116,28 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
             "name": user.name,
             "picture": user.picture,
             "first_login": user.first_login,
-            "last_login": user.last_login,
+            "last_login": user.last_login
         }
     }
 
 
+# -------------------------------
+# /auth/me → Get user from JWT
+# -------------------------------
 @router.get("/me")
-def auth_me(token: str, db: Session = Depends(get_db)):
+def auth_me(credentials: HTTPAuthorizationCredentials = Depends(security),
+            db: Session = Depends(get_db)):
+
+    token = credentials.credentials
+
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         user_id = payload.get("user_id")
     except:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user = db.query(User).filter(User.id == user_id).first()
+
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -129,5 +147,5 @@ def auth_me(token: str, db: Session = Depends(get_db)):
         "name": user.name,
         "picture": user.picture,
         "first_login": user.first_login,
-        "last_login": user.last_login,
+        "last_login": user.last_login
     }
