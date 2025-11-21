@@ -26,3 +26,7 @@ Pillow
 # GOOGLE AUTH
 PyJWT==2.8.0
 
+SQLAlchemy==2.0.21
+
+alembic==1.12.0
+
