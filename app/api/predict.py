@@ -1,7 +1,10 @@
 # app/api/predict.py
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+
+# JWT Auth
+from app.utils.auth_utils import decode_jwt
 
 # ML price predictor (ONNX LightGBM)
 from app.services.ml_predictor import predict_price
@@ -21,7 +24,7 @@ router = APIRouter(prefix="/predict", tags=["Valuation & ML Pricing"])
 RENT_RATIO = {
     "hyderabad": 0.025,
     "bangalore": 0.028,
-    "bengaluru": 0.028,
+    "bengengaluru": 0.028,
     "chennai": 0.030,
     "pune": 0.032,
     "mumbai": 0.019,
@@ -67,7 +70,10 @@ class LandValuationRequest(BaseModel):
 # 🔥 FULL PROPERTY VALUATION + ML PRICE (ONNX)
 # --------------------------------------------------------
 @router.post("/property-valuation")
-async def property_valuation(request: FullPropertyRequest):
+async def property_valuation(
+    request: FullPropertyRequest,
+    user=Depends(decode_jwt)     # 🔥 JWT PROTECTION HERE
+):
     try:
         req_city = request.city.lower()
         req_state = request.state.lower()
@@ -141,7 +147,10 @@ async def property_valuation(request: FullPropertyRequest):
 # BASIC VALUATION
 # ------------------------------------------------
 @router.post("/valuation")
-async def valuation(request: ValuationRequest):
+async def valuation(
+    request: ValuationRequest,
+    user=Depends(decode_jwt)     # 🔥 JWT PROTECTION HERE
+):
     try:
         req_city = request.city.lower()
         req_state = request.state.lower()
@@ -168,7 +177,10 @@ async def valuation(request: ValuationRequest):
 # LAND VALUATION
 # ------------------------------------------------
 @router.post("/land-valuation")
-async def land_valuation(request: LandValuationRequest):
+async def land_valuation(
+    request: LandValuationRequest,
+    user=Depends(decode_jwt)     # 🔥 JWT PROTECTION HERE
+):
     try:
         return await calculate_land_value(
             city=request.city.lower(),

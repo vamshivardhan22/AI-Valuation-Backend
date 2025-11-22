@@ -1,3 +1,5 @@
+# app/api/auth.py
+
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -10,9 +12,9 @@ from datetime import datetime
 from app.database import get_db
 from app.models.user import User
 
-router = APIRouter(prefix="/auth", tags=["Auth"])
+router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-# ENV variables
+# ENV Variables
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 JWT_SECRET = os.getenv("JWT_SECRET")
@@ -22,9 +24,21 @@ REDIRECT_URI = os.getenv("REDIRECT_URI")
 security = HTTPBearer()
 
 
-# -------------------------------
-# Google OAuth Login URL
-# -------------------------------
+# ------------------------------------------------------
+# 🔐 Reusable JWT Verifier (used in all protected routes)
+# ------------------------------------------------------
+def verify_jwt(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload  # contains user_id, email
+    except:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+# ------------------------------------------------------
+# ⭐ Google OAuth Login
+# ------------------------------------------------------
 @router.get("/google/login")
 async def google_login():
     if not GOOGLE_CLIENT_ID or not REDIRECT_URI:
@@ -43,9 +57,9 @@ async def google_login():
     return RedirectResponse(google_auth_url)
 
 
-# -------------------------------
-# Google OAuth Callback
-# -------------------------------
+# ------------------------------------------------------
+# ⭐ Google OAuth Callback → Creates JWT + DB entry
+# ------------------------------------------------------
 @router.get("/google/callback")
 async def google_callback(code: str, db: Session = Depends(get_db)):
 
@@ -73,7 +87,7 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
 
     access_token = token_json["access_token"]
 
-    # Fetch user info
+    # Fetch Google profile data
     async with httpx.AsyncClient() as client:
         user_res = await client.get(
             "https://www.googleapis.com/oauth2/v2/userinfo",
@@ -82,7 +96,7 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
 
     g_user = user_res.json()
 
-    # Check DB user
+    # Check or create user in DB
     user = db.query(User).filter(User.google_id == g_user["id"]).first()
 
     if user:
@@ -121,9 +135,9 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
     }
 
 
-# -------------------------------
-# /auth/me → Get user from JWT
-# -------------------------------
+# ------------------------------------------------------
+# ⭐ /auth/me (Get User From JWT)
+# ------------------------------------------------------
 @router.get("/me")
 def auth_me(credentials: HTTPAuthorizationCredentials = Depends(security),
             db: Session = Depends(get_db)):
@@ -149,3 +163,15 @@ def auth_me(credentials: HTTPAuthorizationCredentials = Depends(security),
         "first_login": user.first_login,
         "last_login": user.last_login
     }
+
+
+# ------------------------------------------------------
+# ⭐ LOGOUT (Stateless)
+# ------------------------------------------------------
+@router.post("/logout")
+def logout():
+    """
+    JWT cannot be invalidated server-side.
+    Frontend must delete the token.
+    """
+    return {"message": "Logout successful. Token removed on client side."}
