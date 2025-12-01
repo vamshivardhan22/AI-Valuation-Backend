@@ -14,40 +14,33 @@ from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-# ENV Variables
+# ------------------------
+# ENVIRONMENT VARIABLES
+# ------------------------
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-JWT_SECRET = os.getenv("JWT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI")
 
-# Security
+# THE FIX: Use this key consistently
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
+
+JWT_SECRET = os.getenv("JWT_SECRET")
+FRONTEND_URL = os.getenv("FRONTEND_URL")  # Must be set in Render
+
 security = HTTPBearer()
 
 
-# ------------------------------------------------------
-# 🔐 Reusable JWT Verifier (used in all protected routes)
-# ------------------------------------------------------
-def verify_jwt(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = credentials.credentials
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        return payload  # contains user_id, email
-    except:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-
-# ------------------------------------------------------
-# ⭐ Google OAuth Login
-# ------------------------------------------------------
-@router.get("/google/login")
-async def google_login():
-    if not GOOGLE_CLIENT_ID or not REDIRECT_URI:
-        raise HTTPException(status_code=500, detail="OAuth config missing")
+# ====================================================
+# 🔵 STEP 1 — FRONTEND calls:  /auth/google
+# ====================================================
+@router.get("/google")
+async def google_start_oauth():
+    if not GOOGLE_CLIENT_ID or not GOOGLE_REDIRECT_URI:
+        raise HTTPException(status_code=500, detail="Google OAuth not configured")
 
     google_auth_url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={GOOGLE_CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
+        f"&redirect_uri={GOOGLE_REDIRECT_URI}"
         "&response_type=code"
         "&access_type=offline"
         "&prompt=consent"
@@ -57,98 +50,91 @@ async def google_login():
     return RedirectResponse(google_auth_url)
 
 
-# ------------------------------------------------------
-# ⭐ Google OAuth Callback → Creates JWT + DB entry
-# ------------------------------------------------------
+# ====================================================
+# 🔵 STEP 2 — Google redirects → /auth/google/callback
+# ====================================================
 @router.get("/google/callback")
 async def google_callback(code: str, db: Session = Depends(get_db)):
 
-    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET or not REDIRECT_URI:
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET or not GOOGLE_REDIRECT_URI:
         raise HTTPException(status_code=500, detail="OAuth config missing")
 
-    token_url = "https://oauth2.googleapis.com/token"
+    # Exchange code → tokens
+    token_res = httpx.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "code": code,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": GOOGLE_REDIRECT_URI,
+            "grant_type": "authorization_code",
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
 
-    token_data = {
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": GOOGLE_CLIENT_SECRET,
-        "code": code,
-        "grant_type": "authorization_code",
-        "redirect_uri": REDIRECT_URI,
-    }
+    token_data = token_res.json()
 
-    # Exchange code → access token
-    async with httpx.AsyncClient() as client:
-        token_res = await client.post(token_url, data=token_data)
+    if "access_token" not in token_data:
+        raise HTTPException(status_code=400, detail=f"Google token error: {token_data}")
 
-    token_json = token_res.json()
+    access_token = token_data["access_token"]
 
-    if "access_token" not in token_json:
-        raise HTTPException(status_code=400, detail=f"Google Auth Failed: {token_json}")
+    # Get Google profile
+    user_info = httpx.get(
+        "https://www.googleapis.com/oauth2/v2/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"},
+    ).json()
 
-    access_token = token_json["access_token"]
+    google_id = user_info["id"]
+    email = user_info["email"]
+    name = user_info.get("name")
+    picture = user_info.get("picture")
 
-    # Fetch Google profile data
-    async with httpx.AsyncClient() as client:
-        user_res = await client.get(
-            "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={"Authorization": f"Bearer {access_token}"}
-        )
+    # Check or create DB user
+    user = db.query(User).filter(User.google_id == google_id).first()
 
-    g_user = user_res.json()
-
-    # Check or create user in DB
-    user = db.query(User).filter(User.google_id == g_user["id"]).first()
-
-    if user:
-        user.last_login = datetime.utcnow()
-    else:
+    if not user:
         user = User(
-            google_id=g_user["id"],
-            email=g_user["email"],
-            name=g_user.get("name"),
-            picture=g_user.get("picture"),
+            google_id=google_id,
+            email=email,
+            name=name,
+            picture=picture,
             first_login=datetime.utcnow(),
-            last_login=datetime.utcnow()
+            last_login=datetime.utcnow(),
         )
         db.add(user)
+    else:
+        user.last_login = datetime.utcnow()
 
     db.commit()
     db.refresh(user)
 
-    # Create JWT token
+    # Create JWT
     jwt_token = jwt.encode(
         {"user_id": user.id, "email": user.email},
         JWT_SECRET,
         algorithm="HS256",
     )
 
-    return {
-        "token": jwt_token,
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "name": user.name,
-            "picture": user.picture,
-            "first_login": user.first_login,
-            "last_login": user.last_login
-        }
-    }
+    # Send token to frontend via redirect
+    redirect_url = f"{FRONTEND_URL}/auth/callback?token={jwt_token}"
+
+    return RedirectResponse(redirect_url)
 
 
-# ------------------------------------------------------
-# ⭐ /auth/me (Get User From JWT)
-# ------------------------------------------------------
+# ====================================================
+# 🔵 GET LOGGED-IN USER
+# ====================================================
 @router.get("/me")
-def auth_me(credentials: HTTPAuthorizationCredentials = Depends(security),
-            db: Session = Depends(get_db)):
+def get_me(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
 
     token = credentials.credentials
 
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        user_id = payload.get("user_id")
+        user_id = payload["user_id"]
     except:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        raise HTTPException(status_code=401, detail="Invalid token")
 
     user = db.query(User).filter(User.id == user_id).first()
 
@@ -160,18 +146,12 @@ def auth_me(credentials: HTTPAuthorizationCredentials = Depends(security),
         "email": user.email,
         "name": user.name,
         "picture": user.picture,
-        "first_login": user.first_login,
-        "last_login": user.last_login
     }
 
 
-# ------------------------------------------------------
-# ⭐ LOGOUT (Stateless)
-# ------------------------------------------------------
+# ====================================================
+# 🔵 LOGOUT
+# ====================================================
 @router.post("/logout")
 def logout():
-    """
-    JWT cannot be invalidated server-side.
-    Frontend must delete the token.
-    """
-    return {"message": "Logout successful. Token removed on client side."}
+    return {"message": "Logout successful"}
