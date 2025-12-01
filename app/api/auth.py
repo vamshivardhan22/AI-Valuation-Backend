@@ -12,44 +12,56 @@ from datetime import datetime
 from app.database import get_db
 from app.models.user import User
 
-__all__ = ["verify_jwt"]   # <-- EXPORT FIX
+__all__ = ["verify_jwt"]   # export for protected routes
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-# ENV Variables
+# Environment Variables
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 JWT_SECRET = os.getenv("JWT_SECRET")
-REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
-FRONTEND_URL = os.getenv("FRONTEND_URL")
+
+# Backend callback URL (Google)
+GOOGLE_REDIRECT_URI = os.getenv(
+    "GOOGLE_REDIRECT_URI",
+    "https://ai-valuation-backend-1.onrender.com/auth/google/callback"
+)
+
+# Redirect user back to frontend with token
+FRONTEND_AUTH_SUCCESS_URL = os.getenv(
+    "FRONTEND_AUTH_SUCCESS_URL",
+    "https://ai-valuation-frontend.vercel.app/auth/callback"
+)
 
 security = HTTPBearer()
 
 
-# ------------------------------------------------------
-# JWT Verification Function (used in protect routes)
-# ------------------------------------------------------
+# =====================================
+# JWT Verifier
+# =====================================
 def verify_jwt(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
         return payload
-    except:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 
-# ------------------------------------------------------
-# GOOGLE LOGIN
-# ------------------------------------------------------
+# =====================================
+# Google Login
+# =====================================
 @router.get("/google/login")
 async def google_login():
-    if not GOOGLE_CLIENT_ID or not REDIRECT_URI:
-        raise HTTPException(status_code=500, detail="OAuth not configured")
+    if not GOOGLE_CLIENT_ID or not GOOGLE_REDIRECT_URI:
+        raise HTTPException(status_code=500, detail="OAuth is not configured")
 
     google_auth_url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={GOOGLE_CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
+        f"&redirect_uri={GOOGLE_REDIRECT_URI}"
         "&response_type=code"
         "&access_type=offline"
         "&prompt=consent"
@@ -59,33 +71,33 @@ async def google_login():
     return RedirectResponse(google_auth_url)
 
 
-# ------------------------------------------------------
-# GOOGLE CALLBACK → JWT → Redirect to Frontend
-# ------------------------------------------------------
+# =====================================
+# Google Callback → generate JWT
+# =====================================
 @router.get("/google/callback")
 async def google_callback(code: str, db: Session = Depends(get_db)):
     token_url = "https://oauth2.googleapis.com/token"
 
-    token_data = {
+    payload = {
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
         "code": code,
         "grant_type": "authorization_code",
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
     }
 
-    # Exchange code
+    # Exchange CODE → ACCESS TOKEN
     async with httpx.AsyncClient() as client:
-        token_res = await client.post(token_url, data=token_data)
+        token_res = await client.post(token_url, data=payload)
 
     token_json = token_res.json()
 
     if "access_token" not in token_json:
-        raise HTTPException(status_code=400, detail="OAuth failed")
+        raise HTTPException(status_code=400, detail=f"OAuth failed: {token_json}")
 
     access_token = token_json["access_token"]
 
-    # Fetch profile
+    # Fetch Google Profile
     async with httpx.AsyncClient() as client:
         user_res = await client.get(
             "https://www.googleapis.com/oauth2/v2/userinfo",
@@ -94,7 +106,7 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
 
     g = user_res.json()
 
-    # DB check/create
+    # Create or Update DB user
     user = db.query(User).filter(User.google_id == g["id"]).first()
 
     if user:
@@ -117,36 +129,49 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
     jwt_token = jwt.encode(
         {"user_id": user.id, "email": user.email},
         JWT_SECRET,
-        algorithm="HS256",
+        algorithm="HS256"
     )
 
-    # REDIRECT TO FRONTEND CALLBACK
-    return RedirectResponse(
-        f"{FRONTEND_URL}/auth/callback?token={jwt_token}"
-    )
+    redirect_url = f"{FRONTEND_AUTH_SUCCESS_URL}?token={jwt_token}"
+
+    return RedirectResponse(redirect_url)
 
 
-# ------------------------------------------------------
-# /auth/me
-# ------------------------------------------------------
+# =====================================
+# Authenticated User Details
+# =====================================
 @router.get("/me")
-def auth_me(credentials: HTTPAuthorizationCredentials = Depends(security),
-            db: Session = Depends(get_db)):
-
-    token = credentials.credentials
-
+def auth_me(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db)
+):
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        payload = jwt.decode(
+            credentials.credentials,
+            JWT_SECRET,
+            algorithms=["HS256"]
+        )
     except:
         raise HTTPException(status_code=401, detail="Invalid token")
 
     user = db.query(User).filter(User.id == payload["user_id"]).first()
+
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    return user
+    return {
+        "id": user.id,
+        "email": user.email,
+        "name": user.name,
+        "picture": user.picture,
+        "first_login": user.first_login,
+        "last_login": user.last_login,
+    }
 
 
+# =====================================
+# Logout (frontend deletes token)
+# =====================================
 @router.post("/logout")
 def logout():
     return {"message": "Logout successful"}
