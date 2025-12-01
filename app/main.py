@@ -4,7 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import Base, engine
 from app.models.user import User
 
-# Create DB
 Base.metadata.create_all(bind=engine)
 
 # Routers
@@ -16,13 +15,11 @@ from app.api.auth import router as auth_router
 app = FastAPI(
     title="AI Valuation Backend",
     version="1.0",
-    description="Backend for AI Valuation System"
 )
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # can restrict later
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -30,10 +27,9 @@ app.add_middleware(
 
 @app.get("/")
 def home():
-    return {"status": "Backend Running Successfully"}
+    return {"status": "Backend Running"}
 
-# Register routers
 app.include_router(test_router)
 app.include_router(predict_router)
 app.include_router(damage_router)
-app.include_router(auth_router, prefix="/auth")
+app.include_router(auth_router)
